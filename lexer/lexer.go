@@ -2,47 +2,39 @@ package lexer
 
 import (
 	"fmt"
+	"unicode/utf8"
 )
 
 type TokenKind int8
 
 const (
 	TokUnknown TokenKind = iota - 1
-	TokNull    TokenKind = iota
+	TokIdentifier
+	TokNodeComment
+	TokNull TokenKind = iota
 	TokString
 	TokBool
-	TokStar
 	TokPlus
-	TokTilde
-	TokCaret
 	TokComma
-	TokDollar
-	TokGreater
 	TokSemicolon
-	TokSlashDash
-	TokDoublePipe
 	TokEqual
-	TokNotEqual
 	TokOpenPar
 	TokClosePar
 	TokOpenBrace
 	TokCloseBrace
 	TokOpenBracket
 	TokCloseBracket
+	TokHexadecimal
+	TokBinary
+	TokOctal
+	TokDecimal
+	TokFloat
 )
 
 type Token struct {
 	lexeme string
 	start  int
 	kind   TokenKind
-}
-
-func newToken(kind TokenKind, start, until int) Token {
-	return Token{
-		kind:   kind,
-		start:  start,
-		lexeme: "",
-	}
 }
 
 type Lexer struct {
@@ -87,10 +79,11 @@ func (l *Lexer) until(until int) string {
 	return l.source[l.current : l.current+until]
 }
 
-func (l *Lexer) literal(lit string) bool {
-	fmt.Println("literal: ", lit)
+func (l *Lexer) literal(lit string, consume bool) bool {
 	if l.until(len(lit)) == lit {
-		l.consume(len(lit))
+		if consume {
+			l.consume(len(lit))
+		}
 
 		return true
 	}
@@ -98,18 +91,35 @@ func (l *Lexer) literal(lit string) bool {
 	return false
 }
 
-func (l *Lexer) TokenizeString(raw bool) {
-	if raw {
-		l.tokenizeRawString()
-	} else {
-		//l.tokenizeString()
-		return
+func (l *Lexer) skipWhile(predicate func(rune) bool) bool {
+	before := l.current
+	for !l.eof() {
+		next := l.peek()
+		if !predicate(next) {
+			return l.current > before
+		}
+
+		l.consume(utf8.RuneLen(next))
 	}
+
+	return l.current > before
+}
+
+func (l *Lexer) skipChars(skipped []rune) bool {
+	return l.skipWhile(func(r rune) bool {
+		for _, s := range skipped {
+			if r == s {
+				return true
+			}
+		}
+
+		return false
+	})
 }
 
 var (
 	digits         = []rune("0123456789")
-	nonIdentifiers = []rune{'\\', '/', '(', ')', '{', '}', '<', '>', ';', '[', ']', '=', ',', '"'}
+	nonIdentifiers = []rune("\\/(){}<>;[]=,\"")
 	whiteSpaces    = []rune{
 		'\u0009',
 		'\u0020',
@@ -124,27 +134,19 @@ var (
 		"\r\n",
 		"\r",
 		"\n",
-		"\u0085",
+		"\u0085", // Next Line
 		"\f",
-		"\u2028",
-		"\u2029",
+		"\u2028", // Line Separator
+		"\u2029", // Paragraph Separator
 	}
 	literals = map[string]TokenKind{
 		"null":  TokNull,
 		"true":  TokBool,
 		"false": TokBool,
-		"*":     TokStar,
 		"+":     TokPlus,
-		"~":     TokTilde,
-		"^":     TokCaret,
 		",":     TokComma,
-		"$":     TokDollar,
-		">":     TokGreater,
 		";":     TokSemicolon,
-		"/-":    TokSlashDash,
-		"||":    TokDoublePipe,
-		"==":    TokEqual,
-		"!=":    TokNotEqual,
+		"=":     TokEqual,
 		"(":     TokOpenPar,
 		")":     TokClosePar,
 		"{":     TokOpenBrace,
@@ -154,7 +156,37 @@ var (
 	}
 )
 
+func isNonInitialCharacter(r rune) bool {
+	return isNonIdentifier(r) || isDigit(r)
+}
+
+func isDigit(r rune) bool {
+	for _, d := range digits {
+		if d == r {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isOctal(r rune) bool {
+	return '0' <= r && r <= '7'
+}
+
+func isHexadecimal(r rune) bool {
+	return isDigit(r) || ('a' <= r && r <= 'f') || ('A' <= r && r <= 'F')
+}
+
+func isBinary(r rune) bool {
+	return r == '0' || r == '1'
+}
+
 func isNonIdentifier(r rune) bool {
+	if r <= 0x20 || 0x10FFFF < r {
+		return true
+	}
+
 	for _, ni := range nonIdentifiers {
 		if ni == r {
 			return true
@@ -174,19 +206,28 @@ func isWhiteSpace(r rune) bool {
 	return false
 }
 
-func (l *Lexer) tokenizeWhiteSpace() bool {
-	fmt.Printf("source: %s, current: %d\n", l.source, l.current)
+func (l *Lexer) tokenizeWhiteSpace(consume bool) bool {
+	fmt.Printf("source: %s, current: %d, stack: %+v\n", l.source, l.current, l.stack)
 	for !l.eof() && isWhiteSpace([]rune(l.source)[l.current]) {
-		l.consume(1)
+		if consume {
+			l.consume(1)
+		}
+
+		return true
 	}
 
 	return false
 }
 
-func (l *Lexer) tokenizeNewLine() bool {
+func (l *Lexer) tokenizeNewLine(consume bool) bool {
 	for _, nl := range newLines {
+		if l.eofAt(len(nl)) {
+			continue
+		}
 		if l.source[l.current:l.current+len(nl)] == nl {
-			l.consume(len(nl))
+			if consume {
+				l.consume(len(nl))
+			}
 			return true
 		}
 	}
@@ -194,7 +235,7 @@ func (l *Lexer) tokenizeNewLine() bool {
 	return false
 }
 
-func (l *Lexer) tokenizeString() /*(l *Lexer)*/ bool {
+func (l *Lexer) tokenizeString(consume bool) /*(l *Lexer)*/ bool {
 	before := l.current
 
 	if l.peek() != '"' {
@@ -202,7 +243,9 @@ func (l *Lexer) tokenizeString() /*(l *Lexer)*/ bool {
 		return false
 	}
 
-	l.consume(1)
+	if consume {
+		l.consume(1)
+	}
 
 	terminated := false
 
@@ -212,11 +255,15 @@ L:
 		case '\\':
 			// TODO: escape sequences
 		case '"':
-			l.consume(1)
+			if consume {
+				l.consume(1)
+			}
 			terminated = true
 			break L
 		default:
-			l.consume(1)
+			if consume {
+				l.consume(1)
+			}
 		}
 	}
 
@@ -229,7 +276,7 @@ L:
 	return true
 }
 
-func (l *Lexer) tokenizeLiteral() bool {
+func (l *Lexer) tokenizeLiteral(consume bool) bool {
 	if l.eof() {
 		return false
 	}
@@ -238,10 +285,11 @@ func (l *Lexer) tokenizeLiteral() bool {
 
 	for lit, kind := range literals {
 		if l.eof() {
-			break
+			return false
 		}
-		if l.literal(lit) {
+		if l.literal(lit, consume) {
 			l.addToken(kind, before, l.current)
+
 			return true
 		}
 	}
@@ -249,49 +297,201 @@ func (l *Lexer) tokenizeLiteral() bool {
 	return false
 }
 
-func (l *Lexer) tokenizeIdentifier() bool {
-	if l.eof() || isNonIdentifier(l.peek()) {
+func (l *Lexer) tokenizeNodeComment(consume bool) bool {
+	if l.eof() {
 		return false
 	}
 
 	before := l.current
 
-	for !l.eof() && !isWhiteSpace(l.peek()) {
-		l.consume(1)
+	if l.literal("/-", consume) {
+		l.addToken(TokNodeComment, before, l.current)
+
+		return true
 	}
 
-	l.addToken(TokUnknown, before, l.current)
+	return false
+}
+
+func (l *Lexer) tokenizeIdentifier(consume bool) bool {
+	fmt.Printf("char: %q, nonInitial: %t\n", l.peek(), isNonInitialCharacter(l.peek()))
+	if l.eof() || isNonInitialCharacter(l.peek()) {
+		return false
+	}
+
+	before := l.current
+
+	if l.literal("true", true) || l.literal("false", true) || l.literal("null", true) {
+		if l.eof() || l.tokenizeWhiteSpace(false) || l.tokenizeNewLine(false) || isNonIdentifier(l.peek()) {
+			l.current = before
+
+			return false
+		}
+	}
+
+L:
+	for i := l.current; i < len([]rune(l.source)); i++ {
+		r := []rune(l.source)[i]
+		if r <= 0x20 || 0x10FFF < r || l.eof() || isWhiteSpace(r) || l.tokenizeNewLine(false) {
+			break L
+		}
+		fmt.Printf("current: %d\n", l.current)
+		for _, c := range nonIdentifiers {
+			if c == r {
+				break L
+			}
+		}
+
+		fmt.Printf("rune: %c, current: %d\n", r, l.current)
+		l.consume(utf8.RuneLen(r))
+	}
+
+	if l.current > before {
+		l.addToken(TokIdentifier, before, l.current)
+
+		return true
+	}
+
+	return false
+}
+
+func (l *Lexer) tokenizeHexadecimal(consume bool) bool {
+	if l.eof() {
+		return false
+	}
+
+	before := l.current
+
+	if !l.literal("0x", true) {
+		return false
+	}
+
+	if l.eof() || !isHexadecimal(l.peek()) {
+		l.current = before
+
+		return false
+	}
+
+	for !l.eof() {
+		next := l.peek()
+		if isHexadecimal(next) || next == '_' {
+			if consume {
+				l.consume(1)
+			}
+			continue
+		}
+	}
+
+	if l.current == before {
+		return false
+	}
+
+	l.addToken(TokHexadecimal, before, l.current)
 
 	return true
 }
 
-type lexFn func(l *Lexer) bool
+func (l *Lexer) tokenizeBinary(consume bool) bool {
+	if l.eof() {
+		return false
+	}
+
+	before := l.current
+
+	if !l.literal("0b", true) {
+		return false
+	}
+
+	// The first character must be either 0 or 1.
+	if l.eof() || !isBinary(l.peek()) {
+		l.current = before
+
+		return false
+	}
+
+	for !l.eof() {
+		next := l.peek()
+		if isBinary(next) || next == '_' {
+			if consume {
+				l.consume(1)
+			}
+			continue
+		}
+	}
+
+	if l.current == before {
+		return false
+	}
+
+	l.addToken(TokBinary, before, l.current)
+
+	return true
+}
+
+func (l *Lexer) tokenizeOctal(consume bool) bool {
+	if l.eof() {
+		return false
+	}
+
+	before := l.current
+
+	if !l.literal("0o", true) {
+		return false
+	}
+
+	if l.eof() || !isOctal(l.peek()) {
+		l.current = before
+
+		return false
+	}
+
+	for !l.eof() {
+		next := l.peek()
+		if isOctal(next) || next == '_' {
+			if consume {
+				l.consume(1)
+			}
+			continue
+		}
+	}
+
+	if l.current == before {
+		return false
+	}
+
+	l.addToken(TokOctal, before, l.current)
+
+	return true
+}
+
+type lexFn func(l *Lexer, consume bool) bool
 
 var choices = []lexFn{
 	(*Lexer).tokenizeWhiteSpace,
-	//(*Lexer).tokenizeNewLine,
+	(*Lexer).tokenizeNewLine,
 	(*Lexer).tokenizeString,
 	(*Lexer).tokenizeLiteral,
+	(*Lexer).tokenizeNodeComment,
+	(*Lexer).tokenizeIdentifier,
 }
 
 func (l *Lexer) Scan() error {
 	var matchedSomehow bool
 	for !l.eof() {
+		matchedSomehow = false
+
 		for _, choice := range choices {
-			if choice(l) {
+			if choice(l, true) {
 				matchedSomehow = true
 			}
 		}
+
 		if !matchedSomehow {
 			return fmt.Errorf("could not match any pattern at %d", l.current)
 		}
 	}
 
 	return nil
-}
-
-func (l *Lexer) tokenizeRawString() {
-
 }
 
 func NewLexer(source string) *Lexer {
